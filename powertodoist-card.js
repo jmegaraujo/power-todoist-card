@@ -1,5 +1,7 @@
-import {LitElement, html, css} from 'https://unpkg.com/lit-element@3.3.2/lit-element.js?module';
-// TODO: register with HACS: https://hacs.xyz/docs/publish/start
+import {LitElement, html, css, unsafeCSS } from 'https://unpkg.com/lit-element@3.3.2/lit-element.js?module';
+//import { renderTemplate } from 'ha-nunjucks';
+
+// registering with HACS: https://hacs.xyz/docs/publish/start
 
 const todoistColors = {
     "berry_red"   : "rgb(184, 37, 111)",
@@ -27,7 +29,8 @@ const todoistColors = {
 
 function replaceMultiple(str2Replace, mapReplaces, was, input){
     mapReplaces["%was%"] = was;
-    mapReplaces["%input%"] = input;
+    mapReplaces["%input%"] =  input;
+    //mapReplaces["%input%"] =  renderTemplate(this.hass, "{{ 'ding' }}"); 
     mapReplaces["%line%"] = '\n';
 
     var re = new RegExp(Object.keys(mapReplaces).join("|"),"gi");
@@ -37,6 +40,8 @@ function replaceMultiple(str2Replace, mapReplaces, was, input){
     return str2Replace.replace(re, function(matched){
         return mapReplaces[matched.toLowerCase()];
     });
+
+
 }
 
 class PowerTodoistCardEditor extends LitElement {
@@ -439,6 +444,10 @@ class PowerTodoistCard extends LitElement {
     // -----------------------------------------------------------------------------------------------------------------------
     
     parseConfig(srcConfig) {
+        // Using eval, dangers and alternatives: https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/eval#never_use_eval!
+        // Thomas Loven old example using Jinja backend renders: https://github.com/thomasloven/lovelace-template-entity-row/blob/master@%7B2020-03-10T16:06:34Z%7D/src/main.js
+        // https://github.com/Savjee/button-text-card/blob/master/src/button-text-card.ts
+
         var parsedConfig;
         var project_notes = [];
         let myStrConfig = JSON.stringify(srcConfig);
@@ -453,9 +462,17 @@ class PowerTodoistCard extends LitElement {
             "%str_labels%"    : strLabels,
         };
         project_notes.forEach(function (value, index) {
-            mapReplaces["%project_notes_" + index - 1 + '%'] = value.content;
+            mapReplaces["%project_notes_" + index + '%'] = value.content;
             if (index==0) mapReplaces["%project_notes%"] = value.content;
         });
+
+        if (this.hass && this.hass.states['sensor.dow']) {
+            //var daze={};
+            var dazeString = this.hass.states['sensor.dow'].state.split(', '); 
+            [0,1,2,3,4,5,6].forEach(function(index) { 
+                mapReplaces['%dow' + (index-1) + '%'] = dazeString[index].replaceAll("'",""); 
+            });
+        }
 
         myStrConfig = replaceMultiple(myStrConfig, mapReplaces);
         try {
@@ -473,6 +490,7 @@ class PowerTodoistCard extends LitElement {
             parsedConfig["error"] = err.name + ": " + err.message + source;
             //alert(err); 
         }
+        //parsedConfig['mapReplaces_debug'] = JSON.stringify(mapReplaces);
         return parsedConfig;
     }
 
@@ -493,6 +511,7 @@ class PowerTodoistCard extends LitElement {
         try { allow        = actions.find(a => typeof a === 'object' && a.hasOwnProperty('allow')).allow || [];} catch (error) { }       
         try { matches      = actions.find(a => typeof a === 'object' && a.hasOwnProperty('match')).match || [];} catch (error) { }       
         try { emphasis     = actions.find(a => typeof a === 'object' && a.hasOwnProperty('emphasis')).emphasis || [];} catch (error) { }       
+        try { paint        = actions.find(a => typeof a === 'object' && a.hasOwnProperty('paint')).paint || [];} catch (error) { }       
 
         const strLabels =  JSON.stringify(item.labels); // moved to Parse, delete when not needed
         let labels = item.labels;
@@ -502,11 +521,17 @@ class PowerTodoistCard extends LitElement {
         if (labelChanges.includes("!!")) labels =     // use !! to clear all labels NOT starting with _   
             labels.filter(function(label) { return label[0] === '_'; }); 
         labelChanges.map(change => {
-            if (change.startsWith("!")) {
-                if (labels.includes(change.slice(1))) labels = labels.filter(e => e !== change.slice(1)); // remove it
+            let newLabel = replaceMultiple(change, {"%user%":this.hass.user.name});
+            if (change.startsWith("!")) {  // remove specific label
+                if (labels.includes(change.slice(1))) 
+                   labels = labels.filter(e => e !== change.slice(1)); // remove it
+            } else if (change.startsWith(":")) { // Toggle specific label
+                if (labels.includes(change.slice(1))) 
+                    labels = labels.filter(e => e !== change.slice(1)); // toggle removes it
+                else 
+                    if (!labels.includes(newLabel)) labels.push(newLabel.slice(1));  // toggle adds it
             } else {
-                let newLabel = replaceMultiple(change, {"%user%":this.hass.user.name});
-                if (!labels.includes(newLabel)) labels.push(newLabel); // add it
+                if (!labels.includes(newLabel)) labels.push(newLabel); // (simple) add it
             }
         });
   
@@ -629,7 +654,7 @@ class PowerTodoistCard extends LitElement {
 
         matches.forEach(([field, value, subActions]) => {
             if ((Array.isArray(item[field]) && item[field].includes(value)) ||
-            item[field] == value)
+                item[field] == value)
             this.itemAction(item, subActions);
         })
 
@@ -951,17 +976,36 @@ class PowerTodoistCard extends LitElement {
                 return (excludes == 0) && (includes > 0);
             });
         }
+        
+    //////////////////////////
+    var extraLabels = [];
+    if (this.myConfig.extra_labels) {
+        this.myConfig.extra_labels.forEach(label => {
+            if (!extraLabels.includes(label)) {
+                extraLabels.push(label);
+            }
+        });
+    }
+
 
     // Starts with named section or default, tries to get section name from id, but lets friendly_name override it:
     let cardName = this.config.filter_section || "ToDoist";
     try { cardName = state.attributes.sections.find(s => { return s.id === section_id }).name } catch (error) { }       
     cardName = this.config.friendly_name || cardName;
 
+    var style = document.createElement( 'style' );
+    style.id = 'customPowerTodoistStyle';
+    try { this.shadowRoot.getElementById(style.id).remove(); } catch (error) { }       
+    if (this.config.style) {
+       style.innerHTML = this.config.style || '';
+       this.shadowRoot.appendChild(style);
+    }
+
 // https://lit.dev/docs/v1/lit-html/writing-templates/#repeating-templates-with-looping-statements
 
     //this.clearSpecialCSS(2000);
 
-    return html`<ha-card>
+    let rendered = html`<ha-card>
         ${(this.config.show_header === undefined) || (this.config.show_header !== false)
             ? html`<h1 class="card-header">
                 <div class="name">${cardName}
@@ -999,11 +1043,11 @@ class PowerTodoistCard extends LitElement {
                                     : html`` }
                                 ${this.renderLabels(item, 
                                     // labels:
-                                    [this.myConfig.show_dates && item.due ? dateFormat(item.due.date, "🗓 " + (this.config.date_format ? this.config.date_format : "dd-mmm H'h'MM")) : [],
-                                     ...item.labels].filter(String), // filter removes the empty []s
+                                    [this.myConfig.show_dates && item.due ? dateFormat(item.due.date, "🗓 dd-mmm H'h'MM") : [],
+                                     ...item.labels,...extraLabels].filter(String), // filter removes the empty []s
                                     // exclusions:
                                     [...(cardLabels.length == 1 ? cardLabels : []), // card labels excluded unless more than one
-                                     ...item.labels.filter(l => l.startsWith("_"))], // "_etc" labels excluded
+                                    ...item.labels.filter(l => l.startsWith("_"))], // "_etc" labels excluded
                                     label_colors) }
                             </div>
                             ${(this.config.show_item_delete === undefined) || (this.config.show_item_delete !== false)
@@ -1022,6 +1066,9 @@ class PowerTodoistCard extends LitElement {
         </div>
         ${this.renderFooter()}
         </ha-card>`;
+
+        //let renderedCSS = css`${unsafeCSS(style)}`;
+        return rendered; // + renderedCSS;
     }
     
     renderLabels(item, labels, exclusions, label_colors) {
@@ -1029,6 +1076,7 @@ class PowerTodoistCard extends LitElement {
             // remove all labels except the due date if it is there:
             labels = this.myConfig.show_dates && item.due ? Array(labels[0]) : [];
         }
+        console.log('Labels being passed to renderLabels:', labels);
 
         let rendered = html`
             ${(labels.length - exclusions.length > 0) 
@@ -1146,10 +1194,6 @@ class PowerTodoistCard extends LitElement {
                 margin: -6px 0 -6px;
                                  /* border: 1px solid red; border-width: 1px 1px 1px 1px; */
             }
-            .powertodoist-special {
-                font-weight: bolder;
-                color: darkred;
-            }
 
             .powertodoist-item-description {
                 display: block;
@@ -1191,6 +1235,11 @@ class PowerTodoistCard extends LitElement {
 
             .powertodoist-item ha-icon-button ha-icon {
                 margin-top: -24px;
+            }
+
+            .powertodoist-special {
+                font-weight: bolder;
+                color: green;
             }
 
             /*General Label Style*/
@@ -1242,7 +1291,7 @@ class PowerTodoistCard extends LitElement {
                 border-radius: 14px;
                 border: 1px solid red; 
                 /*border-width: 1px 1px 1px 1px;*/
-                z-index: 999;
+                z-index: 1;
                 display: none;
                 text-align: center;
                 margin: 15px 35px -30px 45px
